@@ -173,6 +173,15 @@ module Sidekiq
         traverse(chain, 0, args, &block)
       end
 
+      # @api private
+      def call_bulk(job_class, payloads, queue, redis_pool, &block)
+        return yield(payloads) if empty?
+
+        chain = retrieve
+        res = traverse_bulk(chain, 0, job_class, payloads, queue, redis_pool, &block)
+        res || Array.new(payloads.size)
+      end
+
       private
 
       def traverse(chain, index, args, &block)
@@ -181,6 +190,25 @@ module Sidekiq
         else
           chain[index].call(*args) do
             traverse(chain, index + 1, args, &block)
+          end
+        end
+      end
+
+      def traverse_bulk(chain, index, job_class, payloads, queue, redis_pool, &block)
+        if index >= chain.size
+          yield payloads
+        elsif chain[index].respond_to?(:call_bulk)
+          chain[index].call_bulk(job_class, payloads, queue, redis_pool) do |yielded_payloads|
+            traverse_bulk(chain, index + 1, job_class, yielded_payloads, queue, redis_pool, &block)
+          end
+        else
+          # Fallback to per-job processing
+          payloads.map do |p|
+            next nil if p.nil?
+            chain[index].call(job_class, p, queue, redis_pool) do
+              r = traverse_bulk(chain, index + 1, job_class, [p], queue, redis_pool, &block)
+              r.first
+            end || nil
           end
         end
       end
