@@ -173,6 +173,17 @@ module Sidekiq
         traverse(chain, 0, args, &block)
       end
 
+      # Used by Sidekiq to execute client middleware for a bulk push.
+      # Middleware may implement +call_bulk+ to process the entire slice at once;
+      # filtered payloads must be set to nil (not removed) to preserve index alignment.
+      # @api private
+      def invoke_bulk(job_class, payloads, queue, redis_pool, &block)
+        return yield payloads if empty?
+
+        chain = retrieve
+        traverse_bulk(chain, 0, job_class, payloads, queue, redis_pool, &block)
+      end
+
       private
 
       def traverse(chain, index, args, &block)
@@ -182,6 +193,24 @@ module Sidekiq
           chain[index].call(*args) do
             traverse(chain, index + 1, args, &block)
           end
+        end
+      end
+
+      def traverse_bulk(chain, index, job_class, payloads, queue, redis_pool, &block)
+        if index >= chain.size
+          yield payloads
+        elsif chain[index].respond_to?(:call_bulk)
+          chain[index].call_bulk(job_class, payloads, queue, redis_pool) do |filtered|
+            traverse_bulk(chain, index + 1, job_class, filtered, queue, redis_pool, &block)
+          end
+        else
+          next_payloads = payloads.map do |payload|
+            next nil if payload.nil?
+            result = nil
+            chain[index].call(job_class, payload, queue, redis_pool) { result = payload }
+            result
+          end
+          traverse_bulk(chain, index + 1, job_class, next_payloads, queue, redis_pool, &block)
         end
       end
     end

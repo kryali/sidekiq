@@ -158,16 +158,17 @@ module Sidekiq
         raise ArgumentError, "Bulk arguments must be an Array of Arrays: [[1], [2]]" unless slice.is_a?(Array) && slice.all?(Array)
         break [] if slice.empty? # no jobs to push
 
-        payloads = slice.map.with_index { |job_args, index|
+        all_copies = slice.map.with_index { |job_args, index|
           copy = normed.merge("args" => job_args, "jid" => SecureRandom.hex(12))
           copy["at"] = (at.is_a?(Array) ? at[slice_index + index] : at) if at
-          result = middleware.invoke(items["class"], copy, copy["queue"], @redis_pool) do
-            verify_json(copy)
-            copy
-          end
-          result || nil
+          copy
         }
         slice_index += batch_size
+
+        payloads = middleware.invoke_bulk(items["class"], all_copies, normed["queue"], @redis_pool) do |filtered|
+          filtered.each { |p| verify_json(p) if p }
+          filtered
+        end
 
         to_push = payloads.compact
         raw_push(to_push) unless to_push.empty?

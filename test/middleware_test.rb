@@ -64,6 +64,34 @@ class YetAnotherCustomMiddleware
   end
 end
 
+class FilterMiddleware
+  def call(job_class, payload, queue, redis_pool)
+    yield if payload["jid"] == "b"
+  end
+end
+
+class BulkFilterMiddleware
+  def initialize(recorder = nil)
+    @recorder = recorder
+  end
+
+  def call_bulk(job_class, payloads, queue, redis_pool)
+    @recorder << :called if @recorder
+    yield payloads.map { |p| p && p["jid"] == "b" ? nil : p }
+  end
+end
+
+class CountingMiddleware
+  def initialize(recorder)
+    @recorder = recorder
+  end
+
+  def call(job_class, payload, queue, redis_pool)
+    @recorder << :called
+    yield
+  end
+end
+
 class FooC
   include Sidekiq::ClientMiddleware
 
@@ -189,6 +217,55 @@ describe Sidekiq::Middleware do
       final_action = nil
       chain.invoke(nil, nil, nil, nil) { final_action = true }
       assert final_action
+    end
+  end
+
+  describe "invoke_bulk" do
+    it "yields payloads directly when chain is empty" do
+      chain = Sidekiq::Middleware::Chain.new
+      payloads = [{"jid" => "a"}, {"jid" => "b"}]
+      result = chain.invoke_bulk("MyJob", payloads, "default", nil) { |filtered| filtered }
+      assert_equal payloads, result
+    end
+
+    it "non-bulk middleware non-yield suppresses payloads" do
+      chain = Sidekiq::Middleware::Chain.new
+      chain.add FilterMiddleware
+      payloads = [{"jid" => "a"}, {"jid" => "b"}, {"jid" => "c"}]
+      result = chain.invoke_bulk("MyJob", payloads, "default", nil) { |f| f }
+      assert_equal [nil, {"jid" => "b"}, nil], result
+    end
+
+    it "bulk middleware is called once with full payloads and can filter" do
+      recorder = []
+      chain = Sidekiq::Middleware::Chain.new
+      chain.add BulkFilterMiddleware, recorder
+      payloads = [{"jid" => "a"}, {"jid" => "b"}, {"jid" => "c"}]
+      result = chain.invoke_bulk("MyJob", payloads, "default", nil) { |f| f }
+      assert_equal 1, recorder.size
+      assert_equal [{"jid" => "a"}, nil, {"jid" => "c"}], result
+    end
+
+    it "mixed chain: bulk middleware called once, non-bulk called per payload" do
+      bulk_recorder = []
+      per_recorder = []
+      chain = Sidekiq::Middleware::Chain.new
+      chain.add BulkFilterMiddleware, bulk_recorder
+      chain.add CountingMiddleware, per_recorder
+      payloads = [{"jid" => "a"}, {"jid" => "b"}, {"jid" => "c"}]
+      chain.invoke_bulk("MyJob", payloads, "default", nil) { |f| f }
+      assert_equal 1, bulk_recorder.size
+      assert_equal 2, per_recorder.size  # "b" was filtered, so only 2 reach CountingMiddleware
+    end
+
+    it "nil payloads in input are skipped by non-bulk middleware and preserved positionally" do
+      recorder = []
+      chain = Sidekiq::Middleware::Chain.new
+      chain.add CountingMiddleware, recorder
+      payloads = [{"jid" => "a"}, nil, {"jid" => "c"}]
+      result = chain.invoke_bulk("MyJob", payloads, "default", nil) { |f| f }
+      assert_equal 2, recorder.size
+      assert_equal [{"jid" => "a"}, nil, {"jid" => "c"}], result
     end
   end
 end

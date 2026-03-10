@@ -67,6 +67,12 @@ class MiddlewareDynamicQueue
   end
 end
 
+class FilterOddMiddleware
+  def call_bulk(job_class, payloads, queue, redis_pool)
+    yield payloads.map.with_index { |p, i| i.odd? ? nil : p }
+  end
+end
+
 class DJob < BaseJob
 end
 
@@ -535,6 +541,18 @@ describe Sidekiq::Client do
       odd_queue = Sidekiq::Queue.new("odd_queue")
       assert_equal 2, even_queue.size
       assert_equal 1, odd_queue.size
+    end
+
+    it "call_bulk middleware can filter jobs; nil jids at filtered positions" do
+      @client.middleware do |chain|
+        chain.add FilterOddMiddleware
+      end
+      result = @client.push_bulk("class" => MyJob, "args" => [[1], [2], [3], [4]])
+      assert_equal 4, result.size
+      assert result[0]
+      assert_nil result[1]
+      assert result[2]
+      assert_nil result[3]
     end
   end
 
